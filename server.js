@@ -10,9 +10,9 @@ app.use(cors());
 // Browser Instance holder
 let browser;
 
-// Function to start browser
 async function startBrowser() {
-    if (!browser) {
+    if (!browser || !browser.isConnected()) {
+        console.log("Launching Browser...");
         browser = await puppeteer.launch({
             headless: 'new',
             args: [
@@ -26,7 +26,6 @@ async function startBrowser() {
             ],
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
         });
-        console.log("Browser Launched!");
     }
     return browser;
 }
@@ -37,19 +36,17 @@ app.get('/get-insta-info', async (req, res) => {
     const username = req.query.username;
     if (!username) return res.status(400).json({ error: 'Username required' });
 
-    // Clean username (remove @ if present)
     const cleanUser = username.replace('@', '').trim();
 
     try {
         const browserInstance = await startBrowser();
         const page = await browserInstance.newPage();
         
-        // Instagram restricts non-logged in users, so we set a mobile User Agent to look like a phone
+        // Mobile User Agent to ensure lightweight page load
         await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1');
 
-        console.log(`Scraping profile: ${cleanUser}`);
+        console.log(`Fetching profile: ${cleanUser}`);
         
-        // Visit profile
         const response = await page.goto(`https://www.instagram.com/${cleanUser}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
         if(response.status() === 404) {
@@ -57,55 +54,74 @@ app.get('/get-insta-info', async (req, res) => {
             return res.json({ success: false, message: 'User not found' });
         }
 
-        // Extract Data using Meta Tags (Reliable for public data)
+        // Extract Data from Meta Tags (Best for Public Info)
         const data = await page.evaluate(() => {
             const imageEl = document.querySelector('meta[property="og:image"]');
             const descEl = document.querySelector('meta[property="og:description"]');
+            const titleEl = document.querySelector('meta[property="og:title"]');
             
             return {
                 image: imageEl ? imageEl.content : null,
-                desc: descEl ? descEl.content : null
+                desc: descEl ? descEl.content : null,
+                title: titleEl ? titleEl.content : null
             };
         });
 
         await page.close();
 
         if (data.image) {
-            // Parse description for stats (e.g., "100 Followers, 50 Following...")
-            let stats = { followers: 'Unknown', following: 'Unknown' };
+            // Parsing Logic: "100 Followers, 50 Following, 20 Posts - See Instagram photos..."
+            let stats = { followers: '-', following: '-', posts: '-' };
+            let bio = "Instagram User";
+            let fullName = cleanUser;
+
             if (data.desc) {
-                const parts = data.desc.split(' - ')[0].split(', '); // "100 Followers, 20 Following, 10 Posts"
+                // Split description to get numbers
+                const parts = data.desc.split(' - ')[0].split(', ');
                 parts.forEach(p => {
                     if(p.includes('Followers')) stats.followers = p.replace('Followers', '').trim();
                     if(p.includes('Following')) stats.following = p.replace('Following', '').trim();
+                    if(p.includes('Posts')) stats.posts = p.replace('Posts', '').trim();
                 });
+                
+                // Try to extract bio from title or description end if possible, 
+                // but usually meta tags don't have full bio. 
+                // We'll use the stats we found.
+            }
+
+            if (data.title) {
+                // Title format: "Name (@username) • Instagram photos and videos"
+                const namePart = data.title.split(' (@')[0];
+                if(namePart) fullName = namePart;
             }
 
             res.json({ 
                 success: true, 
                 username: cleanUser,
+                fullName: fullName,
                 dp: data.image,
                 followers: stats.followers,
                 following: stats.following,
-                about: data.desc // Full bio string
+                posts: stats.posts,
+                about: `${fullName} • Instagram` // Fallback bio as meta desc doesn't always have it
             });
         } else {
-            res.json({ success: false, message: 'Profile restricted or Login Wall hit' });
+            res.json({ success: false, message: 'Login Wall or Private' });
         }
 
     } catch (error) {
-        console.error("Scraping failed:", error.message);
-        // Agar browser crash ho jaye toh restart karo
+        console.error("Scraping error:", error.message);
+        // Restart browser on crash
         if (browser) await browser.close();
         browser = null;
-        res.status(500).json({ success: false, error: 'Server Busy. Try again.' });
+        res.status(500).json({ success: false, error: 'Server Busy' });
     }
 });
 
 app.get('/', (req, res) => {
-    res.send('Instagram Scraper Backend Running!');
+    res.send('Insta Backend Ready');
 });
 
 app.listen(port, () => {
-    console.log(`Insta Server running on port ${port}`);
+    console.log(`Server running on port ${port}`);
 });
